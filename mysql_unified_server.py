@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-WSL Process Monitor - 统一服务器
-解决所有导入问题的完整服务器实现
+WSL Process Monitor - MySQL统一服务器
+支持MySQL数据库和多级缓存的完整服务器实现
 """
 
 import os
@@ -14,7 +14,6 @@ import time
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Dict, List, Any, Optional
-from concurrent.futures import ThreadPoolExecutor
 
 # 添加路径
 project_root = os.path.dirname(__file__)
@@ -23,15 +22,13 @@ sys.path.insert(0, backend_path)
 
 # 导入配置
 try:
-    from config import get_config
+    from config import get_config, load_config_from_file
+    load_config_from_file()  # 尝试加载配置文件
     config = get_config()
+    print(f"✅ 配置加载成功，数据库类型: {config.database.type}")
 except ImportError:
-    # 如果配置模块不可用，使用默认配置
-    class DefaultConfig:
-        def is_mysql_enabled(self): return False
-        def is_sqlite_enabled(self): return True
-        def get_cache_config(self): return {"enable_multilevel": True}
-    config = DefaultConfig()
+    print("⚠️ 配置模块不可用，使用默认配置")
+    config = None
 
 # 导入依赖
 from fastapi import FastAPI, HTTPException, WebSocket, Depends
@@ -42,18 +39,33 @@ from pydantic import BaseModel
 import uvicorn
 
 # 根据配置选择数据库
-if config.is_mysql_enabled():
+database_manager = None
+database_type = "sqlite"
+
+if config and config.is_mysql_enabled():
     try:
-        import aiomysql
-        from mysql_database import MySQLDatabaseManager as DatabaseManager
+        from mysql_database import MySQLDatabaseManager
+        database_manager = MySQLDatabaseManager(
+            host=config.database.mysql_host,
+            port=config.database.mysql_port,
+            user=config.database.mysql_user,
+            password=config.database.mysql_password,
+            database=config.database.mysql_database
+        )
+        database_type = "mysql"
         print("✅ 使用MySQL数据库 + 多级缓存")
-    except ImportError:
-        print("⚠️ MySQL依赖未安装，回退到SQLite")
-        import aiosqlite
-        from database import DatabaseManager
-else:
+    except ImportError as e:
+        print(f"⚠️ MySQL依赖未安装: {e}")
+        print("请运行: pip install aiomysql")
+        print("回退到SQLite数据库")
+
+if database_manager is None:
+    # 使用SQLite作为回退
     import aiosqlite
     from database import DatabaseManager
+    database_manager = DatabaseManager()
+    database_type = "sqlite"
+    print("✅ 使用SQLite数据库")
 
 # 配置日志
 logging.basicConfig(
@@ -72,83 +84,6 @@ class ApiResponse(BaseModel):
     data: Optional[Any] = None
     error: Optional[str] = None
     timestamp: str
-
-# 数据库管理器
-class DatabaseManager:
-    """数据库管理器"""
-    
-    def __init__(self, db_path: str = "wsl_monitor.db"):
-        self.db_path = db_path
-        self.cache_l1: Dict[str, Any] = {}
-        self.cache_l2: Dict[str, Any] = {}
-        self.cache_timestamps: Dict[str, datetime] = {}
-        self.cache_ttl = timedelta(seconds=30)
-        
-    async def initialize(self):
-        """初始化数据库"""
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await self._create_tables(db)
-                logger.info(f"数据库初始化成功: {self.db_path}")
-        except Exception as e:
-            logger.error(f"数据库初始化失败: {e}")
-            raise
-    
-    async def _create_tables(self, db: aiosqlite.Connection):
-        """创建数据库表"""
-        
-        # 进程历史表
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS process_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                distro_name TEXT NOT NULL,
-                pid INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                user_name TEXT NOT NULL,
-                cpu_percent REAL DEFAULT 0,
-                memory_rss INTEGER DEFAULT 0,
-                recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # 性能指标表
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                metric_name TEXT NOT NULL,
-                metric_value REAL NOT NULL,
-                recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        await db.commit()
-    
-    @asynccontextmanager
-    async def get_connection(self):
-        """获取数据库连接"""
-        connection = None
-        try:
-            connection = await aiosqlite.connect(self.db_path)
-            connection.row_factory = aiosqlite.Row
-            yield connection
-        except Exception as e:
-            logger.error(f"数据库连接错误: {e}")
-            raise
-        finally:
-            if connection:
-                await connection.close()
-    
-    async def record_performance_metric(self, metric_name: str, metric_value: float):
-        """记录性能指标"""
-        try:
-            async with self.get_connection() as db:
-                await db.execute("""
-                    INSERT INTO performance_metrics (metric_name, metric_value, recorded_at)
-                    VALUES (?, ?, ?)
-                """, (metric_name, metric_value, datetime.now().isoformat()))
-                await db.commit()
-        except Exception as e:
-            logger.error(f"记录性能指标失败: {e}")
 
 # WSL服务
 class WSLService:
@@ -250,19 +185,23 @@ class WSLService:
             return []
 
 # 全局实例
-db_manager = DatabaseManager()
 wsl_service = WSLService()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    logger.info("🚀 启动WSL Process Monitor Backend...")
+    logger.info("🚀 启动WSL Process Monitor Backend (MySQL版本)...")
     
     try:
-        await db_manager.initialize()
-        logger.info("✅ 数据库初始化完成")
+        await database_manager.initialize()
+        logger.info(f"✅ {database_type.upper()}数据库初始化完成")
         
-        await db_manager.record_performance_metric("server_start", 1.0)
+        await database_manager.record_performance_metric("server_start", 1.0)
+        
+        # 如果是MySQL，显示缓存统计
+        if database_type == "mysql":
+            cache_stats = await database_manager.get_cache_statistics()
+            logger.info(f"📊 缓存统计: {cache_stats}")
         
         yield
         
@@ -271,13 +210,16 @@ async def lifespan(app: FastAPI):
         raise
     finally:
         logger.info("🛑 关闭WSL Process Monitor Backend...")
-        await db_manager.record_performance_metric("server_stop", 1.0)
+        await database_manager.record_performance_metric("server_stop", 1.0)
+        
+        if hasattr(database_manager, 'cleanup'):
+            await database_manager.cleanup()
 
 # 创建FastAPI应用
 app = FastAPI(
-    title="WSL Process Monitor API - 统一版本",
-    description="高性能WSL进程监控工具",
-    version="2.0.0",
+    title="WSL Process Monitor API - MySQL统一版本",
+    description="高性能WSL进程监控工具，支持MySQL数据库和多级缓存",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -302,21 +244,32 @@ app.add_middleware(
 @app.get("/")
 async def root():
     """根路径"""
+    cache_info = {}
+    if database_type == "mysql" and hasattr(database_manager, 'get_cache_statistics'):
+        try:
+            cache_info = await database_manager.get_cache_statistics()
+        except:
+            cache_info = {"error": "无法获取缓存统计"}
+    
     return {
-        "message": "WSL Process Monitor API - 统一版本",
-        "version": "2.0.0",
+        "message": "WSL Process Monitor API - MySQL统一版本",
+        "version": "2.1.0",
+        "database_type": database_type,
         "features": [
-            "多级缓存系统",
-            "数据库持久化",
+            "MySQL数据库支持" if database_type == "mysql" else "SQLite数据库",
+            "多级缓存系统 (L1内存+L2磁盘+L3Redis模拟)" if database_type == "mysql" else "基础缓存",
             "性能监控",
-            "实时WebSocket"
+            "实时WebSocket",
+            "配置化管理"
         ],
+        "cache_statistics": cache_info,
         "docs": "/docs",
         "endpoints": {
             "health": "/health",
             "distros": "/api/distros",
             "processes": "/api/processes/{distro_name}",
-            "system_status": "/api/system/status"
+            "system_status": "/api/system/status",
+            "cache_stats": "/api/cache/stats" if database_type == "mysql" else None
         }
     }
 
@@ -324,27 +277,77 @@ async def root():
 async def health():
     """健康检查"""
     try:
-        async with db_manager.get_connection() as db:
-            await db.execute("SELECT 1")
+        # 检查数据库连接
+        if database_type == "mysql":
+            async with database_manager.get_connection() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+        else:
+            async with database_manager.get_connection() as db:
+                await db.execute("SELECT 1")
         
         wsl_available = await wsl_service.is_wsl_available()
         
-        return {
+        health_data = {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "version": "2.0.0",
-            "database": "connected",
+            "version": "2.1.0",
+            "database": f"{database_type}_connected",
             "wsl_available": wsl_available
         }
+        
+        # 添加缓存信息
+        if database_type == "mysql":
+            try:
+                cache_stats = await database_manager.get_cache_statistics()
+                health_data["cache_levels"] = len(cache_stats.get("cache_levels", {}))
+                health_data["total_cache_keys"] = (
+                    cache_stats.get("total_l1_keys", 0) + 
+                    cache_stats.get("total_l3_keys", 0)
+                )
+            except:
+                health_data["cache_status"] = "error"
+        
+        return health_data
+        
     except Exception as e:
         logger.error(f"健康检查失败: {e}")
         raise HTTPException(status_code=503, detail="服务不健康")
+
+@app.get("/api/cache/stats")
+async def get_cache_stats():
+    """获取缓存统计（仅MySQL）"""
+    if database_type != "mysql":
+        raise HTTPException(status_code=404, detail="缓存统计仅在MySQL模式下可用")
+    
+    try:
+        stats = await database_manager.get_cache_statistics()
+        return ApiResponse(
+            success=True,
+            data=stats,
+            timestamp=datetime.now().isoformat()
+        ).dict()
+    except Exception as e:
+        logger.error(f"获取缓存统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/distros")
 async def get_distros():
     """获取WSL发行版列表"""
     try:
         logger.info("API调用: 获取WSL发行版列表")
+        
+        # 尝试从缓存获取
+        cache_key = "distros_list"
+        cached_data = await database_manager.get_cached_data(cache_key)
+        
+        if cached_data is not None:
+            logger.info("从缓存获取发行版列表")
+            return ApiResponse(
+                success=True,
+                data=cached_data,
+                timestamp=datetime.now().isoformat()
+            ).dict()
         
         if not await wsl_service.is_wsl_available():
             raise HTTPException(
@@ -354,6 +357,9 @@ async def get_distros():
         
         distros = await wsl_service.get_distros()
         logger.info(f"获取到 {len(distros)} 个发行版")
+        
+        # 缓存结果
+        await database_manager.set_cached_data(cache_key, distros)
         
         return ApiResponse(
             success=True,
@@ -374,6 +380,21 @@ async def get_processes(distro_name: str):
         logger.info(f"API调用: 获取 {distro_name} 的进程列表")
         
         start_time = time.time()
+        
+        # 尝试从缓存获取
+        cache_key = f"processes_{distro_name}"
+        cached_data = await database_manager.get_cached_data(cache_key)
+        
+        if cached_data is not None:
+            logger.info(f"从缓存获取 {distro_name} 进程列表")
+            processing_time = time.time() - start_time
+            await database_manager.record_performance_metric("process_fetch_time_cached", processing_time)
+            return ApiResponse(
+                success=True,
+                data=cached_data,
+                timestamp=datetime.now().isoformat()
+            ).dict()
+        
         processes = await wsl_service.get_processes(distro_name)
         processing_time = time.time() - start_time
         
@@ -390,18 +411,28 @@ async def get_processes(distro_name: str):
             "total_memory_mb": round(total_memory, 2)
         }
         
+        result_data = {
+            "processes": processes,
+            "statistics": statistics,
+            "count": total_processes,
+            "distro": distro_name,
+            "cache_source": "database"
+        }
+        
+        # 缓存结果
+        await database_manager.set_cached_data(cache_key, result_data)
+        
         # 记录性能指标
-        await db_manager.record_performance_metric("process_fetch_time", processing_time)
-        await db_manager.record_performance_metric("process_count", total_processes)
+        await database_manager.record_performance_metric("process_fetch_time", processing_time)
+        await database_manager.record_performance_metric("process_count", total_processes)
+        
+        # 如果是MySQL，记录进程历史
+        if database_type == "mysql" and hasattr(database_manager, 'record_process_history'):
+            await database_manager.record_process_history(distro_name, processes)
         
         return ApiResponse(
             success=True,
-            data={
-                "processes": processes,
-                "statistics": statistics,
-                "count": total_processes,
-                "distro": distro_name
-            },
+            data=result_data,
             timestamp=datetime.now().isoformat()
         ).dict()
         
@@ -423,15 +454,26 @@ async def get_system_status():
         
         running_distros = [d for d in distros if d.get("state") == "Running"]
         
+        system_data = {
+            "wsl_available": wsl_available,
+            "total_distros": len(distros),
+            "running_distros": len(running_distros),
+            "distros": distros,
+            "database_type": database_type,
+            "system_time": datetime.now().isoformat()
+        }
+        
+        # 添加缓存信息
+        if database_type == "mysql":
+            try:
+                cache_stats = await database_manager.get_cache_statistics()
+                system_data["cache_statistics"] = cache_stats
+            except:
+                system_data["cache_statistics"] = {"error": "无法获取缓存统计"}
+        
         return ApiResponse(
             success=True,
-            data={
-                "wsl_available": wsl_available,
-                "total_distros": len(distros),
-                "running_distros": len(running_distros),
-                "distros": distros,
-                "system_time": datetime.now().isoformat()
-            },
+            data=system_data,
             timestamp=datetime.now().isoformat()
         ).dict()
         
@@ -450,7 +492,11 @@ async def websocket_processes(websocket: WebSocket, distro_name: str):
         
         await websocket.send_json({
             "type": "connection",
-            "data": {"message": f"已连接到 {distro_name}", "distro": distro_name},
+            "data": {
+                "message": f"已连接到 {distro_name}",
+                "distro": distro_name,
+                "database_type": database_type
+            },
             "timestamp": datetime.now().isoformat()
         })
         
@@ -477,12 +523,18 @@ async def websocket_processes(websocket: WebSocket, distro_name: str):
                         "processes": processes,
                         "statistics": statistics,
                         "distro": distro_name,
-                        "count": total_processes
+                        "count": total_processes,
+                        "database_type": database_type
                     },
                     "timestamp": datetime.now().isoformat()
                 }
                 
                 await websocket.send_json(message)
+                
+                # 如果是MySQL，异步记录进程历史
+                if database_type == "mysql" and hasattr(database_manager, 'record_process_history'):
+                    asyncio.create_task(database_manager.record_process_history(distro_name, processes))
+                
                 await asyncio.sleep(2)
                 
             except Exception as e:
@@ -502,8 +554,13 @@ async def websocket_processes(websocket: WebSocket, distro_name: str):
         logger.info(f"WebSocket连接关闭: {distro_name}")
 
 if __name__ == "__main__":
+    print(f"🚀 启动WSL Process Monitor - {database_type.upper()}版本")
+    print(f"📊 数据库类型: {database_type}")
+    if database_type == "mysql":
+        print("🔄 多级缓存: L1内存 + L2磁盘 + L3Redis模拟")
+    
     uvicorn.run(
-        "unified_server:app",
+        "mysql_unified_server:app",
         host="127.0.0.1",
         port=8000,
         reload=True,

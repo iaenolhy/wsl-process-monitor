@@ -1,0 +1,28 @@
+{
+  "database": {
+    "type": "mysql",
+    "sqlite_path": "wsl_monitor.db",
+    "mysql_host": "localhost",
+    "mysql_port": 3306,
+    "mysql_user": "root",
+    "mysql_password": "your_password",
+    "mysql_database": "wsl_monitor",
+    "cache_ttl_seconds": 30
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "log_level": "info"
+  },
+  "wsl": {
+    "default_distro": "Ubuntu-22.04",
+    "command_timeout": 30,
+    "process_refresh_interval": 2
+  },
+  "cache": {
+    "enable_multilevel": true,
+    "l1_max_size": 1000,
+    "l2_max_size_mb": 100,
+    "l3_max_size": 5000
+  }
+}
