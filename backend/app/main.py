@@ -44,11 +44,19 @@ except ImportError:
         timestamp: str
 
 # 导入数据库和优化服务
-from .database import db_manager, get_database
-from .services.wsl_service import WSLService
-from .services.optimized_process_service import OptimizedProcessService
-from .api.routes import router as api_router
-from .api.websocket import websocket_endpoint
+try:
+    from .database import db_manager, get_database
+    from .services.wsl_service import WSLService
+    from .services.optimized_process_service import OptimizedProcessService
+    from .api.routes import router as api_router
+    from .api.websocket import websocket_endpoint
+except ImportError:
+    # 如果相对导入失败，使用绝对导入
+    from database import db_manager, get_database
+    from services.wsl_service import WSLService
+    from services.optimized_process_service import OptimizedProcessService
+    from api.routes import router as api_router
+    from api.websocket import websocket_endpoint
 
 # 全局服务实例
 wsl_service = WSLService()

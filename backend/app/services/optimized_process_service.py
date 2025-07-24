@@ -11,8 +11,15 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from .wsl_service import WSLService
-from ..database import DatabaseManager
+try:
+    from .wsl_service import WSLService
+    from ..database import DatabaseManager
+except ImportError:
+    from wsl_service import WSLService
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
