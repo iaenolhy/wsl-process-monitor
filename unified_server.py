@@ -21,18 +21,6 @@ project_root = os.path.dirname(__file__)
 backend_path = os.path.join(project_root, "backend", "app")
 sys.path.insert(0, backend_path)
 
-# 导入配置
-try:
-    from config import get_config
-    config = get_config()
-except ImportError:
-    # 如果配置模块不可用，使用默认配置
-    class DefaultConfig:
-        def is_mysql_enabled(self): return False
-        def is_sqlite_enabled(self): return True
-        def get_cache_config(self): return {"enable_multilevel": True}
-    config = DefaultConfig()
-
 # 导入依赖
 from fastapi import FastAPI, HTTPException, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,28 +28,28 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
+import aiosqlite
 
-# 根据配置选择数据库
-if config.is_mysql_enabled():
-    try:
-        import aiomysql
-        from mysql_database import MySQLDatabaseManager as DatabaseManager
-        print("✅ 使用MySQL数据库 + 多级缓存")
-    except ImportError:
-        print("⚠️ MySQL依赖未安装，回退到SQLite")
-        import aiosqlite
-        from database import DatabaseManager
-else:
-    import aiosqlite
-    from database import DatabaseManager
+# 配置日志 - 完全修复Windows编码问题
+class SafeStreamHandler(logging.StreamHandler):
+    """安全的流处理器，避免编码错误"""
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except (UnicodeEncodeError, ValueError):
+            # 如果编码失败，使用ASCII安全版本
+            try:
+                record.msg = str(record.msg).encode('ascii', 'replace').decode('ascii')
+                super().emit(record)
+            except:
+                pass  # 静默忽略日志错误
 
-# 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('wsl_monitor.log'),
-        logging.StreamHandler()
+        logging.FileHandler('wsl_monitor.log', encoding='utf-8'),
+        SafeStreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -256,21 +244,21 @@ wsl_service = WSLService()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    logger.info("🚀 启动WSL Process Monitor Backend...")
-    
+    logger.info("启动WSL Process Monitor Backend...")
+
     try:
         await db_manager.initialize()
-        logger.info("✅ 数据库初始化完成")
-        
+        logger.info("数据库初始化完成")
+
         await db_manager.record_performance_metric("server_start", 1.0)
-        
+
         yield
-        
+
     except Exception as e:
-        logger.error(f"❌ 应用启动失败: {e}")
+        logger.error(f"应用启动失败: {e}")
         raise
     finally:
-        logger.info("🛑 关闭WSL Process Monitor Backend...")
+        logger.info("关闭WSL Process Monitor Backend...")
         await db_manager.record_performance_metric("server_stop", 1.0)
 
 # 创建FastAPI应用

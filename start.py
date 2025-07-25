@@ -66,21 +66,23 @@ def start_backend():
     print()
     
     try:
-        # 启动后台进程
+        # 启动后台进程 - 修复：不捕获输出，让服务器直接输出到控制台
         process = subprocess.Popen(
             cmd,
             cwd=current_dir,
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+            # 移除stdout和stderr捕获，让输出直接显示
+            creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
         )
-        
+
         print("✅ 后端进程已启动")
         print("⏳ 等待服务器启动...")
-        
+
+        # 给进程一点时间启动
+        time.sleep(2)
+
         return process
-        
+
     except Exception as e:
         print(f"❌ 启动失败: {e}")
         return None
